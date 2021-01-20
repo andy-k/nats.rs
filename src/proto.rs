@@ -51,34 +51,43 @@ pub(crate) fn decode(mut stream: impl BufRead) -> io::Result<Option<ServerOp>> {
     inject_io_failure()?;
 
     // Read a line, which should be human readable.
-    let mut line = Vec::new();
-    if stream.read_until(b'\n', &mut line)? == 0 {
+    let mut buf = Vec::with_capacity(128);
+    if stream.read_until(b'\n', &mut buf)? == 0 {
         // If zero bytes were read, the connection is closed.
         return Ok(None);
     }
 
-    // Convert into a UTF8 string for simpler parsing.
-    String::from_utf8_lossy(&line);
-    let line = String::from_utf8(line).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
-    let line_uppercase = line.trim().to_uppercase();
+    let line: &str = if let Ok(line) = std::str::from_utf8(&buf) {
+        line.trim()
+    } else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cannot parse server info: invalid UTF-8",
+        ));
+    };
 
-    if line_uppercase.starts_with("PING") {
+    // Convert into a UTF8 string for simpler parsing.
+    if line.starts_with("PING") {
         return Ok(Some(ServerOp::Ping));
     }
 
-    if line_uppercase.starts_with("PONG") {
+    if line.starts_with("PONG") {
         return Ok(Some(ServerOp::Pong));
     }
 
-    if line_uppercase.starts_with("INFO") {
+    if line.starts_with("INFO") {
         // Parse the JSON-formatted server information.
-        let server_info = ServerInfo::parse(&line["INFO".len()..])
-            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "cannot parse server info"))?;
+        let server_info = ServerInfo::parse(&line["INFO".len()..]).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "cannot parse server info: invalid ServerInfo",
+            )
+        })?;
 
         return Ok(Some(ServerOp::Info(server_info)));
     }
 
-    if line_uppercase.starts_with("MSG") {
+    if line.starts_with("MSG") {
         // Extract whitespace-delimited arguments that come after "MSG".
         let args = line["MSG".len()..]
             .split_whitespace()
@@ -134,7 +143,7 @@ pub(crate) fn decode(mut stream: impl BufRead) -> io::Result<Option<ServerOp>> {
         }));
     }
 
-    if line_uppercase.starts_with("HMSG") {
+    if line.starts_with("HMSG") {
         // Extract whitespace-delimited arguments that come after "HMSG".
         let args = line["HMSG".len()..]
             .split_whitespace()
@@ -226,14 +235,19 @@ pub(crate) fn decode(mut stream: impl BufRead) -> io::Result<Option<ServerOp>> {
         }));
     }
 
-    if line_uppercase.starts_with("-ERR") {
+    if line.starts_with("-ERR") {
         // Extract the message argument.
         let msg = line["-ERR".len()..].trim().trim_matches('\'').to_string();
 
         return Ok(Some(ServerOp::Err(msg)));
     }
 
-    Ok(Some(ServerOp::Unknown(line)))
+    Ok(Some(ServerOp::Unknown(
+        line.split_whitespace()
+            .next()
+            .unwrap_or("<empty>")
+            .to_string(),
+    )))
 }
 
 /// A protocol operation sent by the client.
